@@ -17,7 +17,7 @@ pub use basis::{BasisSpec, OrbitalLabel, RadialIndex, SHELL_LETTERS};
 pub use bessel::{BesselParams, WaveNumberTable, radial_to_wavenumber, spherical_bessel_j};
 pub use error::{AtomDataError, BasisSpecError};
 pub use pao::{ContractionBlock, ContractionRow, PaoFile};
-pub use radial::{InnerBehavior, LogGrid, RadialTable};
+pub use radial::{InnerBehavior, LogGrid, OuterBehavior, RadialTable};
 pub use species::{DEFAULT_BUFFER_L, GlobalTables, SpeciesData};
 pub use vps::{
     JAveraging, JMinusPart, ScalarProjector, VpsFile, VpsFormat, VpsProjector, average_j_dependent,

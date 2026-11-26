@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
 use crate::{
-    AtomDataError, InnerBehavior, JAveraging, JMinusPart, LogGrid, RadialTable, VpsFile, VpsFormat,
-    VpsProjector, average_j_dependent, j_weights,
+    AtomDataError, InnerBehavior, JAveraging, JMinusPart, LogGrid, OuterBehavior, RadialTable,
+    VpsFile, VpsFormat, VpsProjector, average_j_dependent, j_weights,
 };
 
 fn data_dir() -> PathBuf {
@@ -284,7 +284,14 @@ fn old_format() {
     assert_eq!(f.projectors[1].radial.values()[0], 12.0);
     // out-of-range local index: no line is excluded -> 3 projectors but only 2 energies
     let e = VpsFile::parse(&synthetic_old("local.part.vps 9\n", "")).unwrap_err();
-    assert!(matches!(e, AtomDataError::RowCount { .. }));
+    assert!(matches!(
+        e,
+        AtomDataError::TokenCount {
+            expected: 6,
+            found: 4,
+            ..
+        }
+    ));
     // j-dependent old format is an error
     let e = VpsFile::parse(&synthetic_old(
         "local.part.vps 1\n",
@@ -292,4 +299,176 @@ fn old_format() {
     ))
     .unwrap_err();
     assert!(matches!(e, AtomDataError::OldFormatJDependent));
+}
+
+#[test]
+fn old_format_requires_number_and_local_part() {
+    // `local.part.vps` has no default
+    let e = VpsFile::parse(&synthetic_old("", "")).unwrap_err();
+    assert!(
+        matches!(e, AtomDataError::MissingKeyword { ref keyword, .. } if keyword == "local.part.vps")
+    );
+    let no_number = synthetic_old("local.part.vps 1\n", "").replace("number.vps 3\n", "");
+    let e = VpsFile::parse(&no_number).unwrap_err();
+    assert!(
+        matches!(e, AtomDataError::MissingKeyword { ref keyword, .. } if keyword == "number.vps")
+    );
+    // `number.vps` = 0 is an error
+    let zero = synthetic_old("local.part.vps 0\n", "").replace("number.vps 3", "number.vps 0");
+    assert!(matches!(
+        VpsFile::parse(&zero).unwrap_err(),
+        AtomDataError::OldFormatNoLines
+    ));
+}
+
+#[test]
+fn old_format_nandl_rows() {
+    let ok = synthetic_old("local.part.vps 1\n", "");
+    // four columns are accepted like five; only l is used
+    let four = ok.replace(" 0 2 0 1.30 0.0\n", " 0 2 0 1.30\n");
+    let f = VpsFile::parse(&four).unwrap();
+    assert_eq!(f.projectors.iter().map(|p| p.l).collect::<Vec<_>>(), [0, 2]);
+    // l up to 29 is allowed, 30 is not
+    let l29 = ok.replace(" 2 3 2 1.30 0.0\n", " 2 3 29 1.30 0.0\n");
+    assert_eq!(VpsFile::parse(&l29).unwrap().projectors[1].l, 29);
+    let l30 = ok.replace(" 2 3 2 1.30 0.0\n", " 2 3 30 1.30 0.0\n");
+    assert!(matches!(
+        VpsFile::parse(&l30).unwrap_err(),
+        AtomDataError::Parse { .. }
+    ));
+    let neg = ok.replace(" 2 3 2 1.30 0.0\n", " 2 3 -1 1.30 0.0\n");
+    assert!(matches!(
+        VpsFile::parse(&neg).unwrap_err(),
+        AtomDataError::Parse { .. }
+    ));
+    // three or six columns are errors
+    for bad in [" 0 2 0\n", " 0 2 0 1.30 0.0 7.0\n"] {
+        let t = ok.replace(" 0 2 0 1.30 0.0\n", bad);
+        assert!(matches!(
+            VpsFile::parse(&t).unwrap_err(),
+            AtomDataError::Columns { expected: 4, .. }
+        ));
+    }
+}
+
+#[test]
+fn old_format_projection_energies() {
+    let ok = synthetic_old("local.part.vps 1\n", "");
+    // the index is ignored; pairs are read in projector order across lines
+    let t = ok.replace(" 0 0.7\n 1 -0.3\n", " 5 0.7 9\n -0.3\n");
+    let f = VpsFile::parse(&t).unwrap();
+    assert_eq!(
+        (f.projectors[0].energy, f.projectors[1].energy),
+        (0.7, -0.3)
+    );
+    // a count line is not allowed: it makes the token count odd
+    let t = ok.replace(" 0 0.7\n 1 -0.3\n", " 2\n 0 0.7\n 1 -0.3\n");
+    assert!(matches!(
+        VpsFile::parse(&t).unwrap_err(),
+        AtomDataError::TokenCount {
+            expected: 4,
+            found: 5,
+            ..
+        }
+    ));
+    // extra token, and too few tokens
+    let t = ok.replace(" 1 -0.3\n", " 1 -0.3 0.0\n");
+    assert!(matches!(
+        VpsFile::parse(&t).unwrap_err(),
+        AtomDataError::TokenCount {
+            expected: 4,
+            found: 5,
+            ..
+        }
+    ));
+    let t = ok.replace(" 1 -0.3\n", "");
+    assert!(matches!(
+        VpsFile::parse(&t).unwrap_err(),
+        AtomDataError::TokenCount {
+            expected: 4,
+            found: 2,
+            ..
+        }
+    ));
+    // the block is required while a projector remains
+    let t = ok.replace(
+        "<projection.energies\n 0 0.7\n 1 -0.3\nprojection.energies>\n",
+        "",
+    );
+    assert!(matches!(
+        VpsFile::parse(&t).unwrap_err(),
+        AtomDataError::MissingBlock { .. }
+    ));
+}
+
+#[test]
+fn old_format_without_projectors_needs_no_energy_block() {
+    // one line, used as the local part: no projector remains, V_loc column only
+    let t = "AtomSpecies 6\ngrid.num.output 4\nnumber.vps 1\nlocal.part.vps 0\n<pseudo.NandL\n 0 2 3 1.30 0.0\npseudo.NandL>\n<Pseudo.Potentials\n0 1 5\n0.1 1.1051709180756477 5\n0.2 1.2214027581601699 5\n0.3 1.3498588075760032 5\nPseudo.Potentials>\n";
+    let f = VpsFile::parse(t).unwrap();
+    assert_eq!(f.format, VpsFormat::Old);
+    assert!(f.projectors.is_empty());
+    // a present but non-empty block is then an extra-token error
+    let with = t.replace(
+        "<Pseudo.Potentials",
+        "<projection.energies\n 0 0.5\nprojection.energies>\n<Pseudo.Potentials",
+    );
+    assert!(matches!(
+        VpsFile::parse(&with).unwrap_err(),
+        AtomDataError::TokenCount {
+            expected: 0,
+            found: 2,
+            ..
+        }
+    ));
+}
+
+fn pcc_table(values: &[f64]) -> String {
+    // x_min = 0.5, dx = 0.02, so r_min = e^0.5 and the inner region is r < 1.6487...
+    let mut s = String::from(
+        "AtomSpecies 3\ngrid.num.output 6\ncharge.pcc.calc on\n<project.energies\n0\nproject.energies>\n<Pseudo.Potentials\n",
+    );
+    for i in 0..6 {
+        let x = 0.5 + 0.02 * i as f64;
+        s.push_str(&format!("{x} {} 1.0\n", f64::exp(x)));
+    }
+    s.push_str("Pseudo.Potentials>\n<density.PCC\n");
+    for (i, v) in values.iter().enumerate() {
+        let x = 0.5 + 0.02 * i as f64;
+        s.push_str(&format!("{x} {} {v}\n", f64::exp(x)));
+    }
+    s.push_str("density.PCC>\n");
+    s
+}
+
+#[test]
+fn pcc_continuation_inside_and_outside_the_grid() {
+    // rho(r) = 2 + 0.5 r^2 sampled on the grid: the even quadratic continuation reproduces it
+    // inside r_min, and the last tabulated value is kept beyond r_last.
+    let vals: Vec<f64> = (0..6)
+        .map(|i| {
+            let r = f64::exp(0.5 + 0.02 * i as f64);
+            2.0 + 0.5 * r * r
+        })
+        .collect();
+    let f = VpsFile::parse(&pcc_table(&vals)).unwrap();
+    let pcc = f.pcc_density.unwrap();
+    assert_eq!(pcc.inner(), InnerBehavior::EvenQuadratic);
+    assert_eq!(pcc.outer(), OuterBehavior::Constant);
+    for r in [0.0, 0.3, 1.0, 1.6] {
+        let (v, d) = pcc.eval_with_derivative(r);
+        let (ev, ed) = (2.0 + 0.5 * r * r, r);
+        assert!((v - ev).abs() < 1e-4, "r={r}: value {v} vs {ev}");
+        assert!((d - ed).abs() < 1e-3, "r={r}: slope {d} vs {ed}");
+    }
+    // finite and even at the origin, continuous at r_min
+    let r_min = pcc.grid().r_min();
+    assert!((pcc.eval(0.0) - 2.0).abs() < 1e-4);
+    assert!((pcc.eval(r_min * (1.0 - 1e-12)) - pcc.eval(r_min)).abs() < 1e-9);
+    // beyond the last point: the last tabulated value, not zero
+    let last = *vals.last().unwrap();
+    assert_eq!(pcc.eval(pcc.grid().r_last() * 1.5), last);
+    assert_eq!(pcc.eval(1.0e6), last);
+    // the local potential and projectors keep their zero beyond the grid
+    assert_eq!(f.local_potential.eval(1.0e6), 0.0);
 }

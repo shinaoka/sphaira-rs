@@ -6,10 +6,17 @@
 use std::path::Path;
 
 use crate::error::AtomDataError;
-use crate::radial::{InnerBehavior, RadialTable};
+use crate::radial::{InnerBehavior, OuterBehavior, RadialTable};
 use crate::text::{Document, parse_floats, parse_rows, table_to_columns};
 
 const KIND: &str = "VPS";
+
+/// Sanity bound on `l` in `<project.energies` rows (the book states none).
+const NEW_FORMAT_L_MAX: usize = 99;
+/// Sanity bound on the projector count in `<project.energies`.
+const MAX_PROJECTORS: usize = 1 << 20;
+/// Largest `l` accepted in `<pseudo.NandL` rows of the old format (§2.6).
+const OLD_FORMAT_L_MAX: usize = 29;
 
 /// Which layout the file uses (`nonlocal-pseudopotential.md` §2.3 vs §2.6).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -68,10 +75,13 @@ pub enum JAveraging {
 
 /// A VPS file.
 ///
-/// Out-of-grid rules (§2.7): zero beyond the last point; inside the first point `l = 0` projectors
-/// are extrapolated linearly from the first interval and `l >= 1` projectors are 0. The local
-/// potential and the PCC density are finite at the origin and are held constant there (the book
-/// leaves the PCC treatment outside the grid open, the Open list).
+/// Out-of-grid rules (§2.7): projectors are zero beyond the last point; inside the first point
+/// `l = 0` projectors are extrapolated linearly from the first interval and `l >= 1` projectors
+/// are 0. The local potential is held constant inside the first point (its continuation belongs to
+/// the neutral-atom chapter). The PCC density is continued inside the first point by an even
+/// quadratic `a r^2 + b` ([`InnerBehavior::EvenQuadratic`], matched in value and slope at the
+/// first grid radius: an implementation choice, because the book does not fix the matching
+/// point) and keeps its last tabulated value beyond the last point ([`OuterBehavior::Constant`]).
 #[derive(Clone, Debug)]
 pub struct VpsFile {
     /// New or old layout.
@@ -119,7 +129,10 @@ impl VpsFile {
     /// # Errors
     ///
     /// A typed [`AtomDataError`] if `AtomSpecies` or `grid.num.output` is missing, a required block
-    /// is missing, rows have the wrong number of columns (`3 + N_p`, or `3 + 2 N_p` for j-dependent
+    /// is missing (old format: `number.vps`, `local.part.vps`, `<pseudo.NandL`, and
+    /// `<projection.energies` when a projector remains; [`AtomDataError::OldFormatNoLines`] for
+    /// `number.vps` = 0; [`AtomDataError::TokenCount`] for missing or extra tokens in
+    /// `<projection.energies`; an old-format `l` outside 0..=29), rows have the wrong number of columns (`3 + N_p`, or `3 + 2 N_p` for j-dependent
     /// data), row counts differ from `grid.num.output`, the PCC grid differs from the potential
     /// grid, an old-format file is j-dependent ([`AtomDataError::OldFormatJDependent`]), or the
     /// projector description is inconsistent (non-integer `l`, wrong count).
@@ -196,11 +209,14 @@ impl VpsFile {
                     detail: "`density.PCC` grid differs from `Pseudo.Potentials`".into(),
                 });
             }
-            Some(RadialTable::new(
-                *local_potential.grid(),
-                pcols.remove(0),
-                InnerBehavior::Constant,
-            )?)
+            Some(
+                RadialTable::new(
+                    *local_potential.grid(),
+                    pcols.remove(0),
+                    InnerBehavior::EvenQuadratic,
+                )?
+                .with_outer(OuterBehavior::Constant),
+            )
         } else {
             None
         };
@@ -311,8 +327,8 @@ pub fn average_j_dependent(
 /// (`l`, (`epsilon` or `epsilon_+`, optional `epsilon_-`)) per projector.
 type Description = Vec<(usize, (f64, Option<f64>))>;
 
-fn to_l(line: usize, v: f64) -> Result<usize, AtomDataError> {
-    if v >= 0.0 && v.fract() == 0.0 && v < 100.0 {
+fn to_l(line: usize, v: f64, l_max: usize) -> Result<usize, AtomDataError> {
+    if v >= 0.0 && v.fract() == 0.0 && v <= l_max as f64 {
         Ok(v as usize)
     } else {
         Err(AtomDataError::Parse {
@@ -336,7 +352,7 @@ fn parse_new_energies(
             .into(),
     })?;
     let first = parse_floats(KIND, cl, cline)?;
-    let np = to_l(cl, first.first().copied().unwrap_or(-1.0))?;
+    let np = to_l(cl, first.first().copied().unwrap_or(-1.0), MAX_PROJECTORS)?;
     let cols = if j_dependent { 3 } else { 2 };
     let mut out = Vec::with_capacity(np);
     for &(no, line) in lines {
@@ -349,7 +365,10 @@ fn parse_new_energies(
                 found: row.len(),
             });
         }
-        out.push((to_l(no, row[0])?, (row[1], row.get(2).copied())));
+        out.push((
+            to_l(no, row[0], NEW_FORMAT_L_MAX)?,
+            (row[1], row.get(2).copied()),
+        ));
     }
     if out.len() != np {
         return Err(AtomDataError::RowCount {
@@ -362,12 +381,15 @@ fn parse_new_energies(
     Ok(out)
 }
 
-/// Old format (§2.6): `<pseudo.NandL` rows `index n l rc ...`, `local.part.vps`, `<projection.energies` rows `index eps`.
+/// Old format (§2.6): `number.vps` and `local.part.vps` (both required), `<pseudo.NandL` rows
+/// (four or five numbers, only `l` used), `<projection.energies` (one `index eps` pair per
+/// projector, no count line; required only if a projector remains).
 fn parse_old_description(doc: &Document<'_>) -> Result<Description, AtomDataError> {
-    let nvps: usize = doc.required_value(KIND, "number.vps", "a non-negative integer")?;
-    let local: usize = doc
-        .optional_value(KIND, "local.part.vps", "a non-negative integer")?
-        .unwrap_or(0);
+    let nvps: usize = doc.required_value(KIND, "number.vps", "a positive integer")?;
+    if nvps == 0 {
+        return Err(AtomDataError::OldFormatNoLines);
+    }
+    let local: usize = doc.required_value(KIND, "local.part.vps", "a non-negative integer")?;
     let nl = doc.required_block(KIND, "pseudo.NandL")?;
     if nl.lines.len() != nvps {
         return Err(AtomDataError::RowCount {
@@ -380,7 +402,7 @@ fn parse_old_description(doc: &Document<'_>) -> Result<Description, AtomDataErro
     let mut ls = Vec::new();
     for (i, &(no, line)) in nl.lines.iter().enumerate() {
         let row = parse_floats(KIND, no, line)?;
-        if row.len() < 3 {
+        if !(4..=5).contains(&row.len()) {
             return Err(AtomDataError::Columns {
                 file_kind: KIND,
                 line: no,
@@ -388,40 +410,35 @@ fn parse_old_description(doc: &Document<'_>) -> Result<Description, AtomDataErro
                 found: row.len(),
             });
         }
+        // Only the `l` of projector lines is used (and range-checked); the local-part line is not.
         if i != local {
-            ls.push(to_l(no, row[2])?);
+            ls.push(to_l(no, row[2], OLD_FORMAT_L_MAX)?);
         }
     }
-    let eb = doc.required_block(KIND, "projection.energies")?;
-    // A row with a single number is taken as an optional count line and skipped.
-    let mut energies = Vec::new();
-    for &(no, line) in &eb.lines {
-        let row = parse_floats(KIND, no, line)?;
-        match row.len() {
-            1 => {}
-            2 => energies.push(row[1]),
-            found => {
-                return Err(AtomDataError::Columns {
-                    file_kind: KIND,
-                    line: no,
-                    expected: 2,
-                    found,
-                });
-            }
+    let mut tokens = Vec::new();
+    if let Some(eb) = doc.block("projection.energies") {
+        for &(no, line) in &eb.lines {
+            tokens.extend(parse_floats(KIND, no, line)?);
         }
-    }
-    if energies.len() != ls.len() {
-        return Err(AtomDataError::RowCount {
+    } else if !ls.is_empty() {
+        return Err(AtomDataError::MissingBlock {
             file_kind: KIND,
             block: "projection.energies".into(),
-            expected: ls.len(),
-            found: energies.len(),
+        });
+    }
+    // INVARIANT: the pairs are read as one token stream; the index of each pair is ignored.
+    if tokens.len() != 2 * ls.len() {
+        return Err(AtomDataError::TokenCount {
+            file_kind: KIND,
+            block: "projection.energies".into(),
+            expected: 2 * ls.len(),
+            found: tokens.len(),
         });
     }
     Ok(ls
         .into_iter()
-        .zip(energies)
-        .map(|(l, e)| (l, (e, None)))
+        .zip(tokens.chunks_exact(2))
+        .map(|(l, pair)| (l, (pair[1], None)))
         .collect())
 }
 
