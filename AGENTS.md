@@ -12,13 +12,11 @@ sphaira-rs is an **implementer** repository in the sense of the
 - If the specification is insufficient, open an issue in the specification repository. Do not inspect the reference code.
 - Record in each pull request the specification commit it was built against.
 
-## Shared rules
+## Repository rules
 
-Follow the tensor4all shared agent rules: <https://github.com/tensor4all/tensor4all-agent-rules/> (`rules/index.md`).
+Read [`REPOSITORY_RULES.md`](REPOSITORY_RULES.md) (build profiles with `debug = 0`, layering, ordered reductions,
+errors, test layout, documentation, PRs). It adapts the tensor4all shared agent rules
+(<https://github.com/tensor4all/tensor4all-agent-rules/>), which apply for anything it does not cover.
 Every AI-written issue, issue comment and pull request discloses the model that wrote it
 (`rules/common/provenance.md`).
 
-## Tests
-
-Tests are small and fast: a few atoms, coarse grids, fixed seeds, tight assertions.
-Full SCF regressions are not part of the default test set.

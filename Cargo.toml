@@ -22,3 +22,28 @@ sphaira-scf = { path = "crates/sphaira-scf" }
 [workspace.lints.rust]
 unsafe_code = "deny"
 missing_docs = "warn"
+
+# No default profile carries debug info (REPOSITORY_RULES.md, "Build profiles").
+[profile.dev]
+debug = 0
+
+[profile.test]
+debug = 0
+
+[profile.release]
+debug = 0
+
+[profile.bench]
+debug = 0
+
+# Comprehensive CI runs.
+[profile.ci]
+inherits = "test"
+debug = 0
+incremental = false
+strip = "symbols"
+
+# Opt-in profile for debugger sessions and readable backtraces.
+[profile.release-debug]
+inherits = "release"
+debug = 2
