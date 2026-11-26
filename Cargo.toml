@@ -1,0 +1,24 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/shinaoka/sphaira-rs"
+publish = false
+
+[workspace.dependencies]
+sphaira-comm = { path = "crates/sphaira-comm" }
+sphaira-atomdata = { path = "crates/sphaira-atomdata" }
+sphaira-structure = { path = "crates/sphaira-structure" }
+sphaira-blocks = { path = "crates/sphaira-blocks" }
+sphaira-twocenter = { path = "crates/sphaira-twocenter" }
+sphaira-grid = { path = "crates/sphaira-grid" }
+sphaira-scf = { path = "crates/sphaira-scf" }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"

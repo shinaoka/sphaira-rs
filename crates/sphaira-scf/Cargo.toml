@@ -1,0 +1,15 @@
+[package]
+name = "sphaira-scf"
+description = "Eigenproblem, occupations, mixing, total energy and the SCF loop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+sphaira-comm sphaira-atomdata sphaira-structure sphaira-blocks sphaira-twocenter sphaira-grid.workspace = true

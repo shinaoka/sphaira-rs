@@ -1,0 +1,15 @@
+[package]
+name = "sphaira-twocenter"
+description = "Overlap, kinetic, nonlocal and neutral-atom terms"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+sphaira-atomdata sphaira-structure sphaira-blocks.workspace = true

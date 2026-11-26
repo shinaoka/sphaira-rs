@@ -1,0 +1,15 @@
+[package]
+name = "sphaira-grid"
+description = "Real-space grid fields, atom spheres, Poisson solver and exchange-correlation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+sphaira-comm sphaira-atomdata sphaira-structure.workspace = true
