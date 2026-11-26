@@ -120,7 +120,7 @@ impl LogGrid {
 /// Behaviour of a [`RadialTable`] inside the first grid point (`r < r_min`).
 ///
 /// Implements the "Values outside the grid" table of `pao-basis.md` and `nonlocal-pseudopotential.md` §2.7.
-/// Outside the last grid point every table is exactly zero.
+/// Outside the last grid point a table is zero unless its [`OuterBehavior`] says otherwise.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InnerBehavior {
     /// The value at the first grid point (PAO `l = 0`, densities, local potential).
@@ -129,6 +129,25 @@ pub enum InnerBehavior {
     Zero,
     /// Linear extrapolation in `r` from the first grid interval (VPS projectors with `l = 0`).
     LinearFromFirstInterval,
+    /// Even quadratic `a r^2 + b` continuation (VPS partial-core-correction density,
+    /// `nonlocal-pseudopotential.md` §2.7).
+    ///
+    /// **Implementation choice (the book does not fix the matching point):** the quadratic is
+    /// matched at the first grid radius `r_min` in value and slope (C1), i.e.
+    /// `a = f'(r_min) / (2 r_min)` and `b = f(r_min) - a r_min^2`, with `f'` the derivative of the
+    /// interpolating spline at `r_min`. The result is even in `r`, so it is smooth at the origin.
+    EvenQuadratic,
+}
+
+/// Behaviour of a [`RadialTable`] beyond the last grid point (`r > r_last`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum OuterBehavior {
+    /// Exactly zero (PAO, projectors, local potential).
+    #[default]
+    Zero,
+    /// The last tabulated value (VPS partial-core-correction density,
+    /// `nonlocal-pseudopotential.md` §2.7).
+    Constant,
 }
 
 impl InnerBehavior {
@@ -175,6 +194,7 @@ pub struct RadialTable {
     values: Vec<f64>,
     d2: Vec<f64>,
     inner: InnerBehavior,
+    outer: OuterBehavior,
     cutoff: Option<f64>,
 }
 
@@ -200,6 +220,7 @@ impl RadialTable {
             values,
             d2,
             inner,
+            outer: OuterBehavior::Zero,
             cutoff: None,
         })
     }
@@ -231,6 +252,17 @@ impl RadialTable {
             }
         }
         Self::new(grid, values, inner)
+    }
+
+    /// Returns the table with the given rule beyond the last grid point.
+    pub fn with_outer(mut self, outer: OuterBehavior) -> Self {
+        self.outer = outer;
+        self
+    }
+
+    /// The rule beyond the last grid point.
+    pub fn outer(&self) -> OuterBehavior {
+        self.outer
     }
 
     /// Returns the table with a hard cutoff: `eval` is exactly 0 for `r >= r_c`.
@@ -266,10 +298,15 @@ impl RadialTable {
 
     /// Interpolated value and `d/dr` at `r` (bohr).
     pub fn eval_with_derivative(&self, r: f64) -> (f64, f64) {
-        if r.is_nan() || self.cutoff.is_some_and(|rc| r >= rc) || r > self.grid.r_last() {
+        if r.is_nan() || self.cutoff.is_some_and(|rc| r >= rc) {
             return (0.0, 0.0);
         }
-        let n = self.grid.len();
+        if r > self.grid.r_last() {
+            return match self.outer {
+                OuterBehavior::Zero => (0.0, 0.0),
+                OuterBehavior::Constant => (self.values[self.grid.len() - 1], 0.0),
+            };
+        }
         let r_min = self.grid.r_min();
         if r < r_min {
             return match self.inner {
@@ -279,8 +316,20 @@ impl RadialTable {
                     let slope = (self.values[1] - self.values[0]) / (self.grid.r(1) - r_min);
                     (self.values[0] + slope * (r - r_min), slope)
                 }
+                InnerBehavior::EvenQuadratic => {
+                    let slope = self.spline(r_min).1;
+                    let a = slope / (2.0 * r_min);
+                    let b = self.values[0] - a * r_min * r_min;
+                    (a * r * r + b, 2.0 * a * r)
+                }
             };
         }
+        self.spline(r)
+    }
+
+    /// Spline value and derivative at `r` with `r_min <= r <= r_last`.
+    fn spline(&self, r: f64) -> (f64, f64) {
+        let n = self.grid.len();
         let s = (r.ln() - self.grid.x_min()) / self.grid.dx();
         // INVARIANT: negative `s` saturates to 0 in the cast; `i <= n - 2` keeps `i + 1` in range.
         let i = (s.floor() as usize).min(n - 2);

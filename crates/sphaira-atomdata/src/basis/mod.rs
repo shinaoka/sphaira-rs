@@ -54,24 +54,33 @@ pub struct BasisSpec {
 }
 
 impl BasisSpec {
-    /// Parses a specification.
+    /// Parses a specification (`pao-basis.md`, "String format" and "Interpretation of the string").
     ///
-    /// The part before the last `-` is the PAO file name without `.pao`. After it come shell
-    /// letters `s p d f g` (lowercase, each at most once, any order) followed by a count; `a>b`
-    /// denotes `a` original and `b` contracted radial functions and is accepted when
-    /// `orbital_optimization` is true or `a == b`. Unwritten shells have count 0 (zero counts may
-    /// also be written explicitly).
+    /// The part before the **first** `-` is the PAO file name without `.pao`. After it come
+    /// shell letters `s p d f g` (lowercase only) in any order, each optionally repeated, followed
+    /// by digits. A repeated letter followed by digits replaces the earlier count; a letter without
+    /// digits leaves its count unchanged. Unwritten shells have count 0.
+    ///
+    /// Without `orbital_optimization` a count has at most three digits and `>` is an error. With
+    /// it, every nonzero entry must be written `a>b` (`a` original, `b` contracted radial
+    /// functions, `b <= a`); `b = 0` is accepted. `l_max` is then the largest `l` with nonzero
+    /// original count `a`.
     ///
     /// # Errors
     ///
-    /// A [`BasisSpecError`] for a missing `-`, empty name or shell list, unknown characters, a
-    /// missing or duplicated count, a count above 99, a contraction without optimization or with
-    /// `b == 0` or `b > a`, or when no count is nonzero.
+    /// A [`BasisSpecError`] for a missing `-`, empty or malformed name, empty shell list, any
+    /// character other than lowercase `s p d f g`, digits and `>`
+    /// ([`BasisSpecError::UnexpectedCharacter`]), a `>` without counts on both sides
+    /// ([`BasisSpecError::MissingCount`]), a count of more than three digits without optimization
+    /// ([`BasisSpecError::CountTooLarge`]), `>` without optimization
+    /// ([`BasisSpecError::ContractionWithoutOptimization`]), a nonzero count without `>` with
+    /// optimization ([`BasisSpecError::ExpectedContraction`]), `b > a`
+    /// ([`BasisSpecError::InvalidContraction`]), or when no basis function results.
     pub fn parse(spec: &str, orbital_optimization: bool) -> Result<Self, BasisSpecError> {
         let spec = spec.trim();
         let err_spec = || spec.to_string();
         let dash = spec
-            .rfind('-')
+            .find('-')
             .ok_or_else(|| BasisSpecError::MissingSeparator { spec: err_spec() })?;
         let (name, body) = (&spec[..dash], &spec[dash + 1..]);
         if name.is_empty() || name.chars().any(char::is_whitespace) {
@@ -82,7 +91,6 @@ impl BasisSpec {
         }
         let mut counts = [0usize; 5];
         let mut primitives = [0usize; 5];
-        let mut seen = [false; 5];
         let bytes = body.as_bytes();
         let mut pos = 0;
         while pos < bytes.len() {
@@ -94,30 +102,24 @@ impl BasisSpec {
                     position: dash + 1 + pos,
                 });
             };
-            if seen[l] {
-                return Err(BasisSpecError::DuplicateShell {
-                    spec: err_spec(),
-                    letter: ch,
-                });
-            }
-            seen[l] = true;
             pos += 1;
-            let original = read_count(body, &mut pos, spec, ch)?.ok_or_else(|| {
-                BasisSpecError::MissingCount {
-                    spec: err_spec(),
-                    letter: ch,
-                }
-            })?;
-            let mut contracted = original;
+            let original = read_count(body, &mut pos, spec, ch, orbital_optimization)?;
             if pos < bytes.len() && bytes[pos] == b'>' {
                 pos += 1;
-                contracted = read_count(body, &mut pos, spec, ch)?.ok_or_else(|| {
-                    BasisSpecError::MissingCount {
+                if !orbital_optimization {
+                    return Err(BasisSpecError::ContractionWithoutOptimization {
                         spec: err_spec(),
                         letter: ch,
-                    }
-                })?;
-                if contracted == 0 || contracted > original {
+                    });
+                }
+                let missing = || BasisSpecError::MissingCount {
+                    spec: err_spec(),
+                    letter: ch,
+                };
+                let original = original.ok_or_else(missing)?;
+                let contracted = read_count(body, &mut pos, spec, ch, orbital_optimization)?
+                    .ok_or_else(missing)?;
+                if contracted > original {
                     return Err(BasisSpecError::InvalidContraction {
                         spec: err_spec(),
                         letter: ch,
@@ -125,17 +127,20 @@ impl BasisSpec {
                         contracted,
                     });
                 }
-                if contracted != original && !orbital_optimization {
-                    return Err(BasisSpecError::ContractionWithoutOptimization {
+                counts[l] = contracted;
+                primitives[l] = original;
+            } else if let Some(n) = original {
+                if orbital_optimization && n != 0 {
+                    return Err(BasisSpecError::ExpectedContraction {
                         spec: err_spec(),
                         letter: ch,
-                        original,
-                        contracted,
+                        count: n,
                     });
                 }
+                counts[l] = n;
+                primitives[l] = n;
             }
-            counts[l] = contracted;
-            primitives[l] = original;
+            // A letter without digits leaves its count unchanged.
         }
         if counts.iter().all(|&n| n == 0) {
             return Err(BasisSpecError::NoOrbitals { spec: err_spec() });
@@ -178,10 +183,11 @@ impl BasisSpec {
         self.counts != self.primitives
     }
 
-    /// Largest `l` with `N_l > 0` (`pao-basis.md`, "Interpretation of the string").
+    /// Largest `l` with a nonzero original (primitive) count (`pao-basis.md`, "Interpretation of
+    /// the string"; equals the largest `l` with `N_l > 0` unless a shell is contracted to zero).
     pub fn l_max(&self) -> usize {
-        // INVARIANT: `parse` rejects specifications with all counts zero.
-        self.counts.iter().rposition(|&n| n > 0).unwrap_or(0)
+        // INVARIANT: `parse` rejects specifications with all counts zero, so some primitive count is nonzero.
+        self.primitives.iter().rposition(|&n| n > 0).unwrap_or(0)
     }
 
     /// `sum_l (2l+1) N_l`.
@@ -212,12 +218,14 @@ impl BasisSpec {
     }
 }
 
-/// Reads a run of ASCII digits at `*pos`; `Ok(None)` if there is none.
+/// Reads a run of ASCII digits at `*pos`; `Ok(None)` if there is none. Without orbital
+/// optimization at most three digits are allowed; with it only overflow of `usize` is an error.
 fn read_count(
     body: &str,
     pos: &mut usize,
     spec: &str,
     letter: char,
+    orbital_optimization: bool,
 ) -> Result<Option<usize>, BasisSpecError> {
     let start = *pos;
     while body.as_bytes().get(*pos).is_some_and(u8::is_ascii_digit) {
@@ -226,13 +234,17 @@ fn read_count(
     if *pos == start {
         return Ok(None);
     }
-    match body[start..*pos].parse::<usize>() {
-        Ok(n) if n <= 99 => Ok(Some(n)),
-        _ => Err(BasisSpecError::CountTooLarge {
-            spec: spec.to_string(),
-            letter,
-        }),
+    let too_large = || BasisSpecError::CountTooLarge {
+        spec: spec.to_string(),
+        letter,
+    };
+    if !orbital_optimization && *pos - start > 3 {
+        return Err(too_large());
     }
+    body[start..*pos]
+        .parse::<usize>()
+        .map(Some)
+        .map_err(|_| too_large())
 }
 
 #[cfg(test)]

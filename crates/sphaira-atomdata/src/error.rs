@@ -50,41 +50,41 @@ pub enum BasisSpecError {
         /// The shell letter.
         letter: char,
     },
-    /// The same shell letter appears twice.
+    /// A count with more digits than allowed (or too large to represent).
     #[error(
-        "basis specification `{spec}`: shell `{letter}` appears more than once; merge the counts"
+        "basis specification `{spec}`: count of shell `{letter}` is too large; without orbital optimization use at most three digits"
     )]
-    DuplicateShell {
-        /// The offending specification.
-        spec: String,
-        /// The shell letter.
-        letter: char,
-    },
-    /// A count that does not fit in the supported range.
-    #[error("basis specification `{spec}`: count of shell `{letter}` is too large; use at most 99")]
     CountTooLarge {
         /// The offending specification.
         spec: String,
         /// The shell letter.
         letter: char,
     },
-    /// `a>b` with `a != b` although orbital optimization is not in use.
+    /// `>` written although orbital optimization is not in use.
     #[error(
-        "basis specification `{spec}`: contraction `{letter}{original}>{contracted}` requires orbital optimization; remove `>{contracted}` or enable orbital optimization"
+        "basis specification `{spec}`: contraction of shell `{letter}` (`>`) requires orbital optimization; remove `>` and the count after it, or enable orbital optimization"
     )]
     ContractionWithoutOptimization {
         /// The offending specification.
         spec: String,
         /// The shell letter.
         letter: char,
-        /// Number of original radial functions.
-        original: usize,
-        /// Number after contraction.
-        contracted: usize,
     },
-    /// `a>b` with `b == 0` or `b > a`.
+    /// With orbital optimization a nonzero entry is not written `a>b`.
     #[error(
-        "basis specification `{spec}`: contraction `{letter}{original}>{contracted}` is invalid; the contracted count must satisfy 1 <= count <= original"
+        "basis specification `{spec}`: with orbital optimization shell `{letter}{count}` must be written `{letter}{count}>b` with b <= {count}"
+    )]
+    ExpectedContraction {
+        /// The offending specification.
+        spec: String,
+        /// The shell letter.
+        letter: char,
+        /// The count written without `>`.
+        count: usize,
+    },
+    /// `a>b` with `b > a`.
+    #[error(
+        "basis specification `{spec}`: contraction `{letter}{original}>{contracted}` is invalid; the contracted count must not exceed the original count"
     )]
     InvalidContraction {
         /// The offending specification.
@@ -222,6 +222,25 @@ pub enum AtomDataError {
         "VPS file is in the old format (no `<project.energies` block) but `j.dependent.pseudo.potentials` is on; use a new-format file"
     )]
     OldFormatJDependent,
+    /// An old-format VPS file declares `number.vps` = 0.
+    #[error(
+        "VPS file: `number.vps` is 0 in an old-format file; it must list at least the local-part line (`number.vps >= 1`)"
+    )]
+    OldFormatNoLines,
+    /// A block holds a different number of numeric tokens than required.
+    #[error(
+        "{file_kind} file: block `{block}` holds {found} numbers but {expected} were expected; remove extra entries or add the missing ones"
+    )]
+    TokenCount {
+        /// `"PAO"` or `"VPS"`.
+        file_kind: &'static str,
+        /// The block name.
+        block: String,
+        /// Expected number of tokens.
+        expected: usize,
+        /// Found number of tokens.
+        found: usize,
+    },
     /// Other inconsistency in file content.
     #[error("{file_kind} file: {detail}")]
     Inconsistent {
