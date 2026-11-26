@@ -100,12 +100,10 @@ fn out_of_grid_values() {
 fn leading_radial_functions_are_orthonormal() {
     for name in ["H5.0.pao", "C5.0.pao", "O6.0.pao"] {
         let f = read(name);
-        for l in 0..=f.lmax {
+        for (l, funcs) in f.radial.iter().enumerate().take(f.lmax + 1) {
             for a in 0..4 {
                 for b in 0..=a {
-                    let ov = f.radial[l][a]
-                        .trapezoid_r2_product(&f.radial[l][b])
-                        .unwrap();
+                    let ov = funcs[a].trapezoid_r2_product(&funcs[b]).unwrap();
                     let expect = if a == b { 1.0 } else { 0.0 };
                     assert!(
                         (ov - expect).abs() < 1e-3,
