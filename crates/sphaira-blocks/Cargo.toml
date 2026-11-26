@@ -12,4 +12,5 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-sphaira-comm sphaira-structure.workspace = true
+sphaira-comm.workspace = true
+sphaira-structure.workspace = true

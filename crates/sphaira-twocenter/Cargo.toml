@@ -12,4 +12,6 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-sphaira-atomdata sphaira-structure sphaira-blocks.workspace = true
+sphaira-atomdata.workspace = true
+sphaira-structure.workspace = true
+sphaira-blocks.workspace = true
