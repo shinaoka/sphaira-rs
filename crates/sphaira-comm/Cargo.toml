@@ -17,7 +17,8 @@ default = []
 mpi = ["dep:mpi", "mpi/mpi-rt-sys-backend"]
 
 [dependencies]
-num-complex = "0.4"
+num-complex = { version = "0.4", features = ["bytemuck"] }
+bytemuck = "1"
 mpi = { package = "rsmpi-rt", version = "0.8.2", default-features = false, optional = true }
 
 [[example]]

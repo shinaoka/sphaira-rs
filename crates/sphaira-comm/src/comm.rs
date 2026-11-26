@@ -87,20 +87,28 @@ pub trait Comm {
     /// overwritten with the rank-ordered sum; on all other ranks `recv` is left untouched (it may
     /// be empty).
     ///
+    /// Cost: the partial results are gathered, so `root` holds `size() * n` elements (O(P·n)
+    /// memory on `root`; `MpiComm` gathers to `root` only). These reductions are meant for small
+    /// buffers (scalars, energies, counts). Large block or grid reductions use dedicated plans
+    /// (data-structures §7.2), not these methods.
+    ///
     /// # Panics
     ///
     /// If `root >= size()`, the `send` lengths differ between ranks, or `root`'s `recv.len()`
-    /// differs from `send.len()`.
+    /// differs from `send.len()`. Integer element types panic on overflow of the sum.
     fn reduce_ordered<T: Element>(&self, root: usize, send: &[T], recv: &mut [T]);
 
     /// Ordered element-wise sum delivered to every rank.
     ///
     /// Like [`Comm::reduce_ordered`], but `recv` (length `n`) is overwritten on all ranks, with
-    /// bitwise identical contents.
+    /// bitwise identical contents. Same cost and intended use as [`Comm::reduce_ordered`]:
+    /// O(P·n) memory on one rank (`MpiComm`: gather to rank 0, ordered sum, broadcast;
+    /// `SimComm`: every rank sums the gathered contributions itself).
     ///
     /// # Panics
     ///
-    /// If the `send` lengths differ between ranks or `recv.len() != send.len()`.
+    /// If the `send` lengths differ between ranks or `recv.len() != send.len()`. Integer element
+    /// types panic on overflow of the sum.
     fn allreduce_ordered<T: Element>(&self, send: &[T], recv: &mut [T]);
 
     /// Convenience: every rank's value `n` gathered on every rank (`result[r]` is rank `r`'s `n`).

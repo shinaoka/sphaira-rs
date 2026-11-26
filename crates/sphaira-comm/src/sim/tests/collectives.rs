@@ -250,3 +250,31 @@ fn self_comm_equals_sim_comm_p1() {
     let sim = SimComm::run(1, script);
     assert_eq!(sim[0], script(&SelfComm));
 }
+
+#[test]
+#[should_panic(expected = "i64 overflow in ordered reduction")]
+fn i64_overflow_panics() {
+    SimComm::run(2, |c| {
+        let mut o = [0i64];
+        c.allreduce_ordered(&[i64::MAX], &mut o);
+    });
+}
+
+#[test]
+#[should_panic(expected = "usize overflow in ordered reduction")]
+fn usize_overflow_panics() {
+    SimComm::run(3, |c| {
+        let mut o = [0usize];
+        c.reduce_ordered(0, &[usize::MAX / 2 + 1], &mut o);
+    });
+}
+
+#[test]
+fn integer_sum_at_the_limit_is_exact() {
+    let r = SimComm::run(2, |c| {
+        let mut o = [0u64];
+        c.allreduce_ordered(&[if c.rank() == 0 { u64::MAX - 5 } else { 5 }], &mut o);
+        o[0]
+    });
+    assert_eq!(r, vec![u64::MAX, u64::MAX]);
+}

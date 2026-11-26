@@ -1,5 +1,7 @@
 //! [`MpiComm`]: real MPI through rsmpi-rt (data-structures §7.1). Feature `mpi`.
 
+use std::borrow::Cow;
+
 use mpi::Count;
 use mpi::collective::CommunicatorCollectives;
 use mpi::datatype::{Partition, PartitionMut};
@@ -7,13 +9,14 @@ use mpi::topology::{Color, SimpleCommunicator};
 use mpi::traits::{Communicator, Root};
 
 use crate::comm::{Comm, check_allgatherv, check_alltoallv, displacements};
-use crate::element::{Element, decode_into, encode, ordered_sum_words};
+use crate::element::{Element, ordered_sum_words};
 
 /// A communicator backed by an MPI communicator (data-structures §7.1).
 ///
-/// All elements travel as `u64` words (see [`Element`]), and the ordered reductions are built from
-/// an all-gather followed by a local rank-ordered sum, never from `MPI_Reduce`/`MPI_Allreduce`
-/// (data-structures §7.3). Unlike [`crate::SimComm`], mismatched collective sequences are *not*
+/// Elements travel as `u64` words (see [`Element`]); `f64`, `i64`, `u64` and `Complex<f64>`
+/// buffers are sent without conversion. The ordered reductions never use `MPI_Reduce` or
+/// `MPI_Allreduce` (data-structures §7.3): they gather the partial results and sum them in
+/// increasing rank order. Unlike [`crate::SimComm`], mismatched collective sequences are *not*
 /// detected; they behave as in MPI.
 ///
 /// Obtain the MPI environment with `mpi::initialize()` (keep the `Universe` alive) and wrap
@@ -47,6 +50,18 @@ fn counts_displs(counts: &[usize], words: usize) -> (Vec<Count>, Vec<Count>) {
     )
 }
 
+/// Runs `recv_words` with a word buffer for `out`: the elements themselves when they are plain
+/// words, otherwise a temporary that is converted back afterwards.
+fn with_recv_words<T: Element>(out: &mut [T], f: impl FnOnce(&mut [u64])) {
+    if let Some(w) = T::as_words_mut(out) {
+        f(w);
+    } else {
+        let mut tmp = vec![0u64; out.len() * T::WORDS];
+        f(&mut tmp);
+        T::from_words(&tmp, out);
+    }
+}
+
 impl MpiComm {
     /// Wraps an existing `mpi` communicator (for example `universe.world()`).
     ///
@@ -69,13 +84,19 @@ impl MpiComm {
         self.comm
     }
 
-    fn allgather_words(&self, send: &[u64], counts: &[usize], words: usize) -> Vec<u64> {
-        let (c, d) = counts_displs(counts, words);
-        let total: usize = counts.iter().sum::<usize>() * words;
-        let mut out = vec![0u64; total];
-        let mut part = PartitionMut::new(&mut out[..], c, d);
-        self.comm.all_gather_varcount_into(send, &mut part);
-        out
+    /// Gathers equal-length blocks onto `root` and sums them there in rank order into `out`
+    /// (only meaningful on `root`; other ranks pass `None`).
+    fn gather_sum<T: Element>(&self, root: usize, send: &[T], out: Option<&mut [T]>) {
+        let words: Cow<'_, [u64]> = T::as_words(send);
+        let target = self.comm.process_at_rank(root as i32);
+        match out {
+            Some(out) => {
+                let mut all = vec![0u64; words.len() * self.size()];
+                target.gather_into_root(&words[..], &mut all[..]);
+                ordered_sum_words(&all, self.size(), out);
+            }
+            None => target.gather_into(&words[..]),
+        }
     }
 }
 
@@ -103,17 +124,23 @@ impl Comm for MpiComm {
 
     fn bcast<T: Element>(&self, root: usize, buf: &mut [T]) {
         assert!(root < self.size(), "bcast: root {root} out of range");
-        let mut w = encode(buf);
-        self.comm
-            .process_at_rank(root as i32)
-            .broadcast_into(&mut w[..]);
-        decode_into(&w, buf);
+        let target = self.comm.process_at_rank(root as i32);
+        if self.rank() == root {
+            let mut w = T::as_words(buf).into_owned();
+            target.broadcast_into(&mut w[..]);
+        } else {
+            with_recv_words(buf, |w| target.broadcast_into(w));
+        }
     }
 
     fn allgatherv<T: Element>(&self, send: &[T], counts: &[usize], recv: &mut [T]) {
         check_allgatherv(self.rank(), self.size(), send.len(), counts, recv.len());
-        let out = self.allgather_words(&encode(send), counts, T::WORDS);
-        decode_into(&out, recv);
+        let sw = T::as_words(send);
+        let (c, d) = counts_displs(counts, T::WORDS);
+        with_recv_words(recv, |w| {
+            let mut part = PartitionMut::new(w, c, d);
+            self.comm.all_gather_varcount_into(&sw[..], &mut part);
+        });
     }
 
     fn alltoallv<T: Element>(
@@ -130,14 +157,14 @@ impl Comm for MpiComm {
             recv.len(),
             recv_counts,
         );
-        let sw = encode(send);
-        let mut rw = vec![0u64; recv.len() * T::WORDS];
+        let sw = T::as_words(send);
         let (sc, sd) = counts_displs(send_counts, T::WORDS);
         let (rc, rd) = counts_displs(recv_counts, T::WORDS);
-        let sp = Partition::new(&sw[..], sc, sd);
-        let mut rp = PartitionMut::new(&mut rw[..], rc, rd);
-        self.comm.all_to_all_varcount_into(&sp, &mut rp);
-        decode_into(&rw, recv);
+        with_recv_words(recv, |w| {
+            let sp = Partition::new(&sw[..], sc, sd);
+            let mut rp = PartitionMut::new(w, rc, rd);
+            self.comm.all_to_all_varcount_into(&sp, &mut rp);
+        });
     }
 
     fn reduce_ordered<T: Element>(&self, root: usize, send: &[T], recv: &mut [T]) {
@@ -145,16 +172,15 @@ impl Comm for MpiComm {
             root < self.size(),
             "reduce_ordered: root {root} out of range"
         );
-        let n = send.len();
-        let counts = vec![n; self.size()];
-        let all = self.allgather_words(&encode(send), &counts, T::WORDS);
         if self.rank() == root {
             assert_eq!(
                 recv.len(),
-                n,
+                send.len(),
                 "reduce_ordered: recv.len() != send.len() on root"
             );
-            ordered_sum_words(&all, self.size(), recv);
+            self.gather_sum(root, send, Some(recv));
+        } else {
+            self.gather_sum(root, send, None);
         }
     }
 
@@ -164,8 +190,11 @@ impl Comm for MpiComm {
             send.len(),
             "allreduce_ordered: recv.len() != send.len()"
         );
-        let counts = vec![send.len(); self.size()];
-        let all = self.allgather_words(&encode(send), &counts, T::WORDS);
-        ordered_sum_words(&all, self.size(), recv);
+        if self.rank() == 0 {
+            self.gather_sum(0, send, Some(&mut *recv));
+        } else {
+            self.gather_sum(0, send, None);
+        }
+        self.bcast(0, recv);
     }
 }
